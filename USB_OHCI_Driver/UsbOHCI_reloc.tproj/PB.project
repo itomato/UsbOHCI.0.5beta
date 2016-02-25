@@ -1,0 +1,15 @@
+DOCICONFILES = ();
+FILESTABLE = {
+    OTHER_SOURCES = (Makefile.preamble, Makefile, Makefile.postamble, Makefile.driver_preamble, Load_Commands.sect);
+    OTHER_LIBS = ();
+    H_FILES = (TransferRequest.h, USBDevice.h, USBEndpoint.h, USBIsoTransfer.h, UsbOHCI.h, USBTransfer.h);
+    CLASSES = (TransferRequest.m, USBDevice.m, USBEndpoint.m, USBIsoTransfer.m, UsbOHCI.m, USBTransfer.m);
+};
+LOCALIZABLE_FILES = {
+};
+PROJECTVERSION = 1.1;
+INSTALLDIR = "";
+PROJECTTYPE = Tool;
+PROJECTNAME = UsbOHCI_reloc;
+GENERATEMAIN = YES;
+LANGUAGE = English;

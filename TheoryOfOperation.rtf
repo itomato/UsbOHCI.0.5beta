@@ -1,0 +1,275 @@
+{\rtf0\ansi{\fonttbl\f0\fswiss Helvetica;\f1\fmodern Ohlfs;}
+\paperw12900
+\paperh11960
+\margl140
+\margr520
+\pard\tx520\tx1060\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\f0\b\i0\ulnone\qc\fs48\fc0\cf0 Theory of Operation\
+
+\b0\ql\fs24 \
+
+\b\fs36 \
+Introduction\
+
+\b0\fs24 \
+This document is written to describe how this driver is supposed to operate.  Whether it actually operates in that fashion is anyone's guess.  Right now, the features included in the driver are only a subset of those which could be implemented.  Hopefully these notes will provide enough information that others will be able to expand and improve the code.  \
+\
+This program was begun more as a proof of principle that USB could be implemented on OpenStep than as the beginning of a real distributable driver.  It is not optimised for speed.  In fact, this driver uses more high-level constructs than any other driver I've written.  I decided early in the development not to use either the Linux or BSD drivers as a reference.  OpenStep provides a much richer environment to write drivers, and I wanted a driver which could exploit these advantages as much as possible.  So this development has been completely from scratch using the USB and OHCI specifications, and the OpenStep Device Driver documentation as the guide.  The code contains extensive comments which make reference to specific sections in these documents to provide the background and motivation for what I've done.  The code also documents places where operation is not as expected, and places where things just don't work.  Someone (Eric Raymond?) made the remark about open-source software, "With enough eyes, all bugs are shallow."  Perhaps many of these quirks can be remedied by those with more skill than I.\
+\
+\
+
+\b\fs36 The Pieces
+\b0\fs24 \
+\
+There are several data structures and classes which support the driver which must be understood before the general control/data flow can be discussed.  There are two  fundamental  data structures upon which everything else is built.  These are the USB endpoint descriptor, and the USB transfer descriptor.  These two structures are defined in the file "ohci.h" near the middle of the file.  They are precisely the same structures as is defined in the OpenHCI specification paper on page 16 and page 20.  This paper may be obtained on-line from this address:\
+\
+	http://www6.compaq.com/productinfo/development/openhci.html\
+\
+Communication with a USB device is done by sending data to the 'endpoints' in the device.   Each endpoint is represented in software as a data structure and maintained in a shared memory location which is accessible both by the hardware controller and the software driver.  Each endpoint structure is contained in its own USBEndpoint object which also maintains other essential housekeeping data.  You should remember that the hardware only has access to the endpoint descriptor structure.  While the endpoint descriptor maintains the operational characteristics (speed, data direction, etc) and the current state of the endpoint, the primary purpose of the endpoint descriptor is to maintain a linked list of transfer descriptors.  Transfer descriptor structures provide pointers to the buffers for the actual data which is to be exchanged with the device.   These data buffers must be in wired memory accessable to both the hardware controller and the software driver.  Data buffers, or packets, are limited in size, so several transfer descriptors are typically needed to process one request for data.  Each transfer descriptor points to a small piece of the data, and is placed sequentially on the linked list attached to the endpoint descriptor.   Each transfer descriptor structure is contained in its own USBTransfer object which also maintains other essential housekeeping information.  Every millisecond, the hardware controller will determine if any transfer descriptors have been linked into the chain.  When it finds one, it will perform the indicated data transfer operation, either from the device or to the device.\
+\
+The overall purpose of this driver can be described in two halves.  The top half must take a request for a data transfer from an external device driver, instantiate the necessary transfer descriptors to point to the data, and place these transfer descriptors both on the endpoint descriptor's data queue and in a container object called a TranferRequest.  The TransferRequest object keeps the list of all transfer descriptors which were created to fulfill a particular request, along with the appropriate NXConditionLocks necessary to inform the calling process when an entire request has been fulfilled.  The bottom half of the driver must sleep until an interrupt from the hardware indicates that a single transfer descriptor has been processed.  When this interrupt is detected, the memory for the transfer descriptor is freed.  When all transfer descriptors for a particular request have been processed, the TransferRequest object notifies the calling driver that its request has been satisfied using its NXConditionLock.  If an error is detected, or a transfer desciptor sits too long without being processed, it is also this driver's responsibility to handle the error condition appropriately, and inform the calling driver that something has gone wrong.\
+\
+
+\pard\tx760\tx1060\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\fi-780\li780\fc0\cf0 Note: 	The timeout and error recovery portions of this driver are suspect.  I don't believe they're operating properly.  I've seen conditions which cause the entire driver to hang, but it happens with such irregularity that I haven't yet been able to diagnose the cause.\
+
+\pard\tx520\tx1060\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\fc0\cf0 \
+The USBDevice class is the last piece which must be described.  This is another container object which keeps a list of all the USBEndpoint objects in a particular device, along with several housekeeping variables such as the device's USB address, its USB class and subclass, and its operational status.  This information is necessary to take the appropriate action if a device is unplugged from the bus.\
+\
+\
+
+\b\fs36 Flow of Control
+\b0\fs24 \
+\
+There are five paths of control flow through the driver:\
+\
+	o  Driver and hardware initialization flow\
+	o  Data transfer flow\
+	o  Error processing flow\
+	o  Timeout processing flow\
+	o  Device installation flow\
+\
+Each of these will be described in turn.\
+\
+\
+
+\b\fs36 Driver and Hardware Initialization
+\b0\fs24 \
+\
+
+\b\fs32 Hardware Detection\
+
+\b0\fs24 \
+During the boot phase of machine start-up, OpenStep will load this driver and send it a probe:  message.  The purpose of the probe: message is to determine if the hardware is installed, and if it is, to initialize it for operation.  The probe: method is located in the file UsbOHCI.m, and it begins by sending itself a -probeForUSB_OHCI: message.  This method detect the presence of the USB controller by reading the ConfigSpace registers using the -getPCIConfigSpace:withDeviceDescription: method of the IODirectDevice class.   The ConfigSpace registers must conform to these requirements:\
+\
+	o  ClassCode register must have a value of 0x0C, which indicates a Serial Bus Controller\
+	o  SubClassCode register must have a value of 0x03 which indicates USB support\
+	o  ProgIF register must have a value of 0x10 which indicates an OHCI  interface\
+\
+If these requirements are satisfied, the probeForUSB_OHCI method returns a non-nil value, and the code proceeds to the initialization phase.\
+\
+
+\pard\tx520\tx1060\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\b\fs32\fc0\cf0 Hardware Initialization\
+
+\pard\tx520\tx1060\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\b0\fs24\fc0\cf0 \
+Once the hardware's existance has been verified, initialization begins with the -initFromDeviceDescription: method.  This method first sets the base memory address of the PCI card using the -initMemBaseFromDeviceDescription method.  Once the base memory address has been established, it is possible to communicate with the hardware's registers.  The initialization continues with the -initOHCIRegistersFromDeviceDescription method which allocates memory space for the various shared memory buffers required by the hardware.  Nearly all the communication between the driver and the hardware occurs using these shared memory buffers.  Notice this method only allocates the necessary memory; it does not actually place the pointers in the hardware's registers yet.  After the memory buffers have been allocated, the -initIRQFromDeviceDescription method is invoked.  This method initializes the PCI interrupt registers to the IRQ specified in the Instance0.table.\
+\
+
+\pard\tx520\tx740\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\fi-740\li740\fc0\cf0 Note:	-initIRQFromDeviceDescription: is also suspect.  I have not been able to make my PCI card work on any interrupt line other than IRQ 11.  Since there is no technical documentation for the board, I don't know if it is hardwired for IRQ 11, or if I am simply not performing this initialization correctly.\
+
+\pard\tx520\tx1060\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\fc0\cf0 \
+Once the PCI interrupts have been initialized, we begin setting up the NXLocks which allow only one thread at a time to access the various queue lists.  In this code, we maintain three queue lists: \
+\
+	o  The command queue, usbCommandList, which is the primary queue for data I/O Transfer Requests.\
+	o  The processed queue, usbProcessedList,  which is the list of Transfer Requests in progress\
+	o  The error queue, errorTransferList, which is the list of Transfer Requests which were processed with errors.\
+\
+Once these three queues and their NXLocks are initialized, -initFromDeviceDescription then starts the primary IOThread.  This is the thread which actually does the processing of data requests.\
+\
+We then set the name of the driver, register the driver with the operating system, and enable all hardware interrupts.  Initialization continues by starting three more utility threads:\
+\
+	o  The plumberdaemon thread handles all USB transfer descriptors which were marked with errors.\
+	o  The timeoutdaemon thread handles all Transfer Requests which have gone beyond their expiration time.  	o  The installdaemon thread handles hot-pluggable devices.\
+\
+Each of these is notified by the interrupt processing method, -interruptOccurred, that it has work to do using NXConditionLocks.  This will be discussed in greater detail below.\
+\
+Once all these things are done, we have enough machinery in place to start the hardware up.  We send the message -startHardware which initializes the hardware registers with the pointers to the memory locations we allocated previously.  The hardware is reset, and told to begin processing USB frames.  At this point, everything is up and running.\
+\
+But we still have more initialization to perform.  It is necessary to interrogate the USB and discover what devices are connected.  When a device is detected, our driver must create a new USBDevice, determine how many and what kind of endpoints it has, create USBEndpoint objects for each, and install these endpoints in both the hardware queue, and in the USBDevice endpoint list.  All these things are done from the -enumerateDevices and -installDeviceOnPort: methods.  Once -enumerateDevices is finished, we are through with driver initialization, and control returns to the kernel.\
+\
+\
+
+\b\fs36 Data Transfer Flow with No Errors
+\b0\fs24 \
+\
+USB devices support two means of data transfer.  The first is raw unformatted data I/O to an endpoint.  This is the normal mechanism for communication.  Then there is the USB Standard Device Request.  This is a specially formatted data message normally sent to the control endpoint which is used to extract information about the device, or set control parameters for the device.  This driver supports both of these mechanisms and we will discuss each in turn.\
+\
+
+\b\i All
+\b0\i0  data transfers to a USB device using this driver must go through one of two publicly declared methods:\
+\
+	- (int)doIOonAddress:(int)usbAddress\
+					endpoint:(int)endpointNum\
+					direction:(int)dataDir\
+					data:(unsigned char *)reqData\
+					ndata:(int)numdata\
+					timeOut:(int)hardTimeOut\
+					from:(id)sender;\
+\
+	- (int)doRequestOnAddress:(int)usbAddress\
+					endpoint:(int)endpointNum\
+					request:(standardRequest_t *)devReq\
+					data:(unsigned char *)reqData\
+					timeOut:(int)hardTimeOut\
+					from:(id)sender;\
+\
+The first of these handles raw I/O to an endpoint while the second performs the USB Standard Device Requests.  Both follow the same basic control path; they only differ in the way data is formatted.  The following discussion applies to both methods.  Here is a quick outline of the control flow, many housekeeping details have been omitted.  We've used doIOonAddress as the example, but the same flow occurs in doRequestOnAddress:\
+\
+
+\pard\tx520\tx1000\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\fc0\cf0 	1)	doIOonAddress is called from an external driver\
+\
+	2)	doIOonAddress initializes a new TransferRequest object encapsulating the\
+		pointer to the data's memory buffer and an NXConditionLock initialized to\
+		TRANSFER_INPROGRESS.\
+\
+	3)	The TransferRequest object is placed on the usbCommandList queue.\
+\
+	4)	A Mach message with the tag IO_COMMAND_MSG is sent to the kernel\
+\
+	5)	This thread schedules the function usbTimeOut to run after the timeout period\
+		has expired, and then executes a lockWhen:TRANSFER_DONE on the Transfer-\
+		Request's NXConditionLock.  This causes the current thread to go to sleep until\
+		the I/O thread unlocks the NXConditionLock with the state TRANSFER_DONE.\
+\
+	6)	While that thread is sleeping, the kernel picks up the IO_COMMAND_MSG, and\
+		issues an Objective-C message -commandRequestOccurred to the driver. \
+		commandRequestOccurred executes in the IOThread.  It de-queues the\
+		TransferRequest from the usbCommandList, places it in usbProcessedList which\
+		acts as the the 'processed' queue, and sends the message ioRequest: to the driver\
+		using TransferRequest as the argument\
+\
+	7)	The ioRequest: method is where the actual data transfer to the hardware occurs.\
+		The number of transfer descriptors required to tranfer the data is determined.\
+		These transfer descriptors are created and initialized, then they are placed on\
+		the endpoint descriptor's TD queue and in the USBEndpoint's transfer descriptor\
+		list.  The last transfer descriptor is flagged to trigger a hardware interrupt when it\
+		is processed.  Finally, the Command Status register is updated to let the hardware\
+		know it has work to do.\
+\
+
+\b 		This completes the 'top half' of the data transfer - all the data has been queued\
+		on the hardware.\
+
+\b0 \
+	8)	The hardware will see the new transfer descriptors during the next frame and perform\
+		the data transfer either to or from the memory buffer as required.  As each transfer\
+		descriptor is processed, it is de-queued and placed in the 'done queue'.  When the\
+		last data transfer has been processed, the hardware issues an interrupt which wakes\
+		up the 'bottom half' of the driver.\
+\
+	9)	The Mach kernel picks up the hardware interrupt and issues an Objective-C message\
+		-interruptOccurred to our driver.  This method determines there are transfer descriptors\
+		on the 'done' queue and issues a -purgeDoneQueue message.  Note: there are many\
+		conditions which can also trigger a hardware interrupt.  -interruptOccurred must determine\
+		which condition requires attention and perform the necessary chores.\
+\
+	10)	The -purgeDoneQueue method extracts the transfer descriptors from the done queue\
+		one by one and examines the condition code field for errors.  If no errors are indicated,\
+		that transfer descriptor is removed from both the TransferRequest's list and the USBEndpoint's\
+		list.  \
+\
+	11)	When the remaining number of transfer descriptors in the TransferRequest has been\
+		reduced to zero with no errors, -purgeDoneQueue unschedules the usbTimeOut function,\
+		and unlocks the TransferRequest's NXConditionLock with the state TRANSFER_DONE.\
+\
+	12)	The external driver's thread wakes up when the condition lock is unlocked, and the\
+		sleeping method -doIOonAddress: finishes.  It removes the TransferRequest from the\
+		processed queue, frees its memory, and returns control (and the data) to the external\
+		driver.\
+\
+
+\pard\tx520\tx780\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\b\fc0\cf0 		This completes a whole data transfer from beginning to end.\
+\
+
+\pard\tx520\tx780\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\b0\fc0\cf0 This is the path we expect when there are no errors.  If, however, an error is indicated in the condition code field of the transfer descriptor, a slightly different route is taken.\
+\
+
+\pard\tx520\tx1060\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\b\fs36\fc0\cf0 Data Transfer Flow with Errors
+\b0\fs24 \
+
+\pard\tx520\tx780\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\fc0\cf0 \
+We pick up after paragraph 10 above.  The -purgeDoneQueue method has just de-queued a transfer descriptor and discovered it has an error listed in the condition code field.  In this case, the following path occurs:\
+\
+
+\pard\tx520\tx1000\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\fc0\cf0 	11)	The TransferRequest object is added to the errorTransferList queue and the problem\
+		transfer descriptor is disposed of.\
+\
+	12)	The plumberLock is unlocked with the state 'PLUMBER_NEEDED' which causes the\
+		error thread 'plumberdaemon' to wake up.\
+\
+	13)	'plumberdaemon' halts the affected endpoint, and removes all transfer descriptors which\
+		 remain in the bad TransferRequest from the endpoint's queue.\
+\
+	14)  The TransferRequest's condition lock is unlocked with the state 'TRANSFER_DONE' and\
+		then is removed from the errorTransferList.\
+\
+	15)	If the endpoint is in a HALT state, the HALT bit is reset, and the device is sent a CLEAR\
+		HALT device request.\
+\
+	16)	The plumberdaemon unlocks the condition lock with PLUMBER_IDLE and immediately\
+		 locks again with PLUMBER_NEEDED.  This causes it to sleep until purgeDoneQueue \
+		detects another error.\
+\
+\
+
+\pard\tx520\tx1060\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\b\fs36\fc0\cf0 Data Transfer Flow with Time Outs
+\b0\fs24 \
+
+\pard\tx520\tx1000\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\fc0\cf0 	\
+In the case where a TransferRequest remains unfulfilled for the duration of its expiration period, the scheduled function usbTimeOut() begins execution.  We pick up from there:\
+\
+	1)	usbTimeOut unlocks the timerLock with the TIMEOUT_FIRED condition.  This\
+		causes the timeoutdaemon to wake up.\
+\
+	2)	The timeoutdaemon operates nearly the same way as the plumberdaemon.  It\
+		examines the usbProcessedList for all TransferRequests which have expired.\
+\
+	3)	When it finds an expired TransferRequest, is pauses the associated endpoint,\
+		and removes all transfer descriptors remaining in the TransferRequest from the\
+		endpoint.\
+\
+	4)	The endpoint is re-enabled, and the TransferRequest's condition lock is unlocked\
+		with a TRANSFER_DONE condition.\
+\
+\
+\
+
+\pard\tx520\tx1060\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\b\fs36\fc0\cf0 Hot-Pluggable Device Attachment/Detachment
+\b0\fs24 \
+
+\pard\tx520\tx1000\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\fc0\cf0 \
+One of the other causes which triggers a hardware interrupt is the attachment or detachment of a device from the USB bus.  When this happens,  the -interruptOccurred method determines whether a device has been added or removed.  In the case a device is removed, all its associated endpoints are halted, and its USBDevice object is marked with hardwareIsUP = NO.  In the case where a device has been attached, -interruptOccurred unlocks the 'installLock' with a condition of INSTALL_NEEDED.  This condition wakes up the installdaemon.  The installdaemon in turn queries the ports for their condition, determines which has a new device.  The new device is querried for its parameters, and a check is done to see if this device has been attached previously (a condition which might occur if the device accidentally had the power removed, and then turned back on).  If the device is recognized as one previously installed, the old endpoints are re-activated, the USBDevice is marked hardwareIsUP=YES, and the old USB address is re-assigned to the hardware.  If this is a new device, it is installed the same way other devices are installed during the boot sequence.\
+\
+
+\fi-720\li720 Note:  In order to use a new device which has been attached in this fashion, it is necessary to run the command 'driverLoader d=DeviceDriver', where DeviceDriver is the driver necessary to provide the interface to the device.\
+
+\fi0\li0 \
+\
+\
+
+\pard\tx520\tx1060\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\b\fs36\fc0\cf0 Conclusion
+\b0\fs24 \
+
+\pard\tx520\tx1000\tx1600\tx2120\tx2660\tx3200\tx3720\tx4260\tx4800\tx5320\fc0\cf0 \
+I think the descriptions provided above will be enough for someone to understand what I am trying to accomplish and how I have implemented the solution.  The details are in the source code itself, which is also included here.  The source code contains extensive comments and references.  It is still in a beta state - there are many places where alternatives methods of implementation are included, but commented out.  \
+\
+There are two major additions which remain to be implemented.  There is no support (or very little support) for isochronous endpoints.  And there is no support for external hubs.  External hubs provide a great deal of the flexibility of the USB, and many 'compound' devices incorperate hubs into their design, so this is a major handicap.  \
+\
+Development will continue and support for these features should eventually materialize.  The code is stable and useful enough that I thought others would benefit from it.  \
+\
+As always, any suggestions, comments, or improvements can be sent to me here:\
+\
+Howard Cole\
+Tucson, AZ\
+hcole@gci-net.com\
+\
+
+}

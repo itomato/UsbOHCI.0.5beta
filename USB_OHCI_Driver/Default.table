@@ -1,0 +1,15 @@
+"Class Names" = "UsbOHCI";
+"Family" = "USB Host";
+"Instance" = "0";
+"DMA Channels" = "";
+"Memory Maps" = "0x80000000-0x80000fff";
+"Version" = "0.5";
+"Server Name" = "UsbOHCI";
+"Title" = "USB Host";
+"Auto Detect IDs" = "0xc8611045";
+"Bus Type" = "PCI";
+"Driver Version" = "UsbOHCI Beta 0.5";
+"Share IRQ Levels" = "Yes";
+"IRQ Levels" = "11";
+"Valid IRQ Levels" = "11";
+"Server Name" = "UsbOHCI";

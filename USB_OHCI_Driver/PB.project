@@ -1,0 +1,22 @@
+DOCICONFILES = ();
+DOCEXTENSIONS = ();
+LOCALIZABLE_FILES = {
+    Info.rtf;
+    Localizable.strings;
+};
+PROJECTVERSION = 2.0;
+INSTALLDIR = "$(HOME)/Library";
+PROJECTTYPE = Bundle;
+PROJECTNAME = UsbOHCI;
+GENERATEMAIN = YES;
+LANGUAGE = English;
+BUNDLE_EXTENSION = config;
+FILESTABLE = {
+    CLASSES = ();
+    OTHER_RESOURCES = (Default.table, UsbOHCIInterface.h);
+    OTHER_SOURCES = (Makefile.preamble, Makefile, Makefile.postamble);
+    H_FILES = (usb.h);
+    SUBPROJECTS = ();
+    STRINGS_FILES = (Localizable.strings);
+    TOOLS = (UsbOHCI_reloc.tproj);
+};
